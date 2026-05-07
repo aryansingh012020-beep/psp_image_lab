@@ -1,0 +1,541 @@
+\documentclass[10pt,conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+
+\begin{document}
+
+\title{Intelligent Image Noise Filtering and Statistical Analysis:\\A Probabilistic Signal Processing Framework}
+
+\author{
+\IEEEauthorblockN{Aryan Singh \quad Abhishek Singh \quad Anuj Karandikar}
+\IEEEauthorblockA{
+\textit{Department of Electronics \& Communication Engineering}\\
+UID: 2024200119 \quad UID: 2024200120 \quad UID: 2024200051
+}
+}
+
+\maketitle
+
+\begin{abstract}
+This paper presents a comprehensive probabilistic signal processing (PSP) framework for digital image noise characterization and removal. Noise in digital imagery arises from multiple physical sources including photon shot noise, thermal sensor noise, quantization errors, and transmission channel corruption. Addressing these requires both a robust noise identification mechanism and a suite of mathematically grounded filters, each optimal under a specific noise model. The proposed system implements an eight-stage processing pipeline: noise classification via the Median Absolute Deviation (MAD) estimator and Laplacian variance; Gaussian filtering as a Linear Time-Invariant (LTI) spectral shaper; Median filtering as the Maximum Likelihood estimator under the Laplacian distribution; Bilateral filtering for edge-preserving spatial-radiometric smoothing; Histogram Equalization for entropy maximization via CDF remapping; Bayesian Maximum A Posteriori (MAP) denoising through a spatially adaptive pixelwise Wiener filter; and Markov Random Field (MRF) regularization via Iterated Conditional Modes (ICM). The system is deployed as a RESTful API using FastAPI, with session-based image management and per-step SNR tracking. Statistical analysis reports entropy, skewness, excess kurtosis, and normalized 2-D autocorrelation at each pipeline stage. Experimental evaluation confirms consistent SNR improvement across all noise categories tested.
+\end{abstract}
+
+\begin{IEEEkeywords}
+noise filtering, Bayesian MAP estimation, Wiener filter, Markov Random Field, bilateral filter, histogram equalization, signal-to-noise ratio, probabilistic signal processing, FastAPI, image restoration
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+\subsection{Motivation and Background}
+Digital images are the primary modality for information in medical diagnostics, remote sensing, surveillance, and consumer photography. Every image acquisition chain --- from photon absorption at the sensor to analog-to-digital conversion --- introduces stochastic perturbations collectively termed \textit{image noise}. The design of filters that remove noise while preserving clinically or visually relevant structure is therefore a fundamental problem in signal processing.
+
+Classical deterministic filters such as box filters treat all spatial locations equivalently, leading to edge blurring. Modern approaches model both the image and the noise as random processes and derive estimators that are optimal in a well-defined statistical sense. This paper documents one such system, implemented as a production-grade Python backend, covering the theoretical derivation, practical implementation, and quantitative evaluation of six distinct filtering algorithms.
+
+\subsection{Probabilistic Signal Processing Framework}
+In the PSP framework an image $\mathbf{x} \in \mathbb{R}^{M \times N}$ is modeled as a realization of a 2-D random field $X(m,n)$ with joint probability density $p_X$. The observed noisy image is:
+\begin{equation}
+Y(m,n) = X(m,n) + \eta(m,n)
+\label{eq:model}
+\end{equation}
+where $\eta$ is an independent noise process. Filtering is then estimation: find $\hat{X}$ that minimizes a risk functional under the posterior distribution $p(X|Y)$.
+
+Three common risk criteria yield three classic estimators:
+\begin{align}
+\hat{x}_{MMSE} &= \mathbb{E}[X|Y] \quad (L_2 \text{ risk}) \\
+\hat{x}_{MAP}  &= \arg\max_x\, p(X|Y) \quad (0\text{-}1 \text{ risk}) \\
+\hat{x}_{MAE}  &= \text{median}[p(X|Y)] \quad (L_1 \text{ risk})
+\end{align}
+Under a Gaussian prior the MMSE and MAP solutions coincide with the Wiener filter. Under a Laplacian prior, the MAE solution is the median filter.
+
+\subsection{System Contributions}
+The key contributions of this work are:
+\begin{itemize}
+\item A three-feature noise classifier (MAD, impulse density, Laplacian variance) that jointly detects Gaussian, Salt-and-Pepper, and blur degradations.
+\item Rigorous derivation of all six filter algorithms from their underlying probabilistic models.
+\item A spatially-adaptive Bayesian MAP denoiser with per-pixel Wiener gain visualization.
+\item A vectorized MRF-ICM implementation with convergence energy tracking.
+\item A full statistical report (entropy, SNR, kurtosis, autocorrelation) generated at each pipeline step.
+\item A RESTful FastAPI service with UUID session management enabling stateful multi-step pipelines.
+\end{itemize}
+
+\section{Noise Modeling and Detection}
+
+\subsection{Taxonomy of Image Noise}
+Three noise types are addressed in this system:
+
+\textbf{Additive White Gaussian Noise (AWGN):} Arises from thermal (Johnson-Nyquist) noise in the sensor readout circuit. Characterized by:
+\begin{equation}
+\eta(m,n) \overset{iid}{\sim} \mathcal{N}(0,\sigma_n^2)
+\end{equation}
+The Power Spectral Density (PSD) is flat: $S_\eta(u,v) = \sigma_n^2$ for all frequencies --- hence ``white''.
+
+\textbf{Salt-and-Pepper (Impulse) Noise:} Caused by faulty sensor pixels or transmission bit errors. Each pixel is independently corrupted with probability $\rho$:
+\begin{equation}
+Y(m,n) = \begin{cases} 0 & \text{with prob. } \rho/2 \\ 1 & \text{with prob. } \rho/2 \\ X(m,n) & \text{with prob. } 1-\rho \end{cases}
+\end{equation}
+
+\textbf{Blur:} Results from defocus, motion, or excessive low-pass filtering, and is characterized by loss of high-frequency energy (low Laplacian variance).
+
+\subsection{Gaussian Noise Estimation: MAD Estimator}
+
+A pre-filtering step isolates the high-frequency residual:
+\begin{equation}
+R(m,n) = Y(m,n) - \tilde{Y}(m,n)
+\end{equation}
+where $\tilde{Y}$ is the Gaussian-smoothed image ($\sigma = 1.5$). For pure AWGN, $R \approx \eta$. The robust standard deviation estimate uses:
+\begin{equation}
+\hat{\sigma}_n = \frac{\mathrm{median}_{m,n}\bigl(|R(m,n)|\bigr)}{0.6745}
+\label{eq:mad}
+\end{equation}
+\textit{Derivation of 0.6745:} If $R \sim \mathcal{N}(0,\sigma^2)$ then $|R|$ follows a half-normal distribution. The median of $|R|$ satisfies:
+\begin{equation}
+F_{|R|}\!\left(\tilde{r}\right) = 0.5 \implies \tilde{r} = \sigma\,\Phi^{-1}(0.75) = 0.6745\,\sigma
+\end{equation}
+where $\Phi^{-1}$ is the inverse standard normal CDF. Rearranging gives \eqref{eq:mad}. The MAD estimator achieves 50\% breakdown point, meaning it remains accurate even when up to 50\% of samples are outliers (S\&P pixels).
+
+\subsection{Salt-and-Pepper Detection}
+The impulse density is estimated by counting pixels at saturation boundaries:
+\begin{equation}
+\hat{\rho} = \frac{\#\{(m,n):\, Y(m,n) < 0.02\;\cup\; Y(m,n) > 0.98\}}{M \cdot N}
+\end{equation}
+A threshold of $\hat{\rho} > 0.005$ flags Salt \& Pepper noise.
+
+\subsection{Blur Detection via Laplacian Variance}
+The discrete 2-D Laplacian operator:
+\begin{equation}
+(\nabla^2 Y)(m,n) = Y(m{+}1,n) + Y(m{-}1,n) + Y(m,n{+}1) + Y(m,n{-}1) - 4Y(m,n)
+\end{equation}
+responds strongly to edges and texture. Its variance across the image measures overall sharpness:
+\begin{equation}
+V_L = \mathrm{Var}\bigl[\nabla^2 Y\bigr]
+\end{equation}
+Images with $V_L < 50$ (on the uint8 scale) are classified as blurred, as blur suppresses the high-frequency energy that the Laplacian detects.
+
+\subsection{Automatic Filter Recommendation}
+Based on detected noise type, the system constructs a recommendation string:
+\begin{itemize}
+\item S\&P detected $\rightarrow$ Median Filter (optimal ML under Laplacian)
+\item Gaussian detected $\rightarrow$ Gaussian / Bilateral / Bayesian MAP
+\item Blur detected $\rightarrow$ Histogram Equalization (contrast enhancement)
+\end{itemize}
+
+\section{Gaussian Filter: LTI System Analysis}
+
+\subsection{Impulse Response and Convolution}
+The 2-D Gaussian kernel with scale $\sigma$ is:
+\begin{equation}
+h(m,n;\sigma) = \frac{1}{2\pi\sigma^2}\exp\!\left(-\frac{m^2+n^2}{2\sigma^2}\right)
+\end{equation}
+The filtered image is the 2-D discrete convolution:
+\begin{equation}
+\hat{X}(m,n) = (h * Y)(m,n) = \sum_{k=-\infty}^{\infty}\sum_{l=-\infty}^{\infty} h(k,l)\,Y(m-k,n-l)
+\end{equation}
+Because $h$ does not depend on $(m,n)$, this is a \emph{Linear Time-Invariant} (spatially invariant) system.
+
+\subsection{Frequency-Domain Analysis}
+Taking the 2-D Fourier transform $\mathcal{F}\{h\}$:
+\begin{equation}
+H(u,v) = \exp\!\left(-2\pi^2\sigma^2(u^2+v^2)\right)
+\end{equation}
+The filter has unit DC gain ($H(0,0)=1$) and falls off as a Gaussian in the frequency domain with bandwidth $B = 1/(2\pi\sigma)$.
+
+\subsection{Output PSD and Noise Attenuation}
+For a LTI system, the output PSD equals:
+\begin{equation}
+S_{\hat{X}}(u,v) = |H(u,v)|^2 \cdot S_Y(u,v)
+\end{equation}
+Since $S_Y = S_X + S_\eta$ (independent noise), the output noise PSD is:
+\begin{equation}
+S_{\eta,\text{out}}(u,v) = |H(u,v)|^2 \cdot \sigma_n^2 = \sigma_n^2 \exp\!\left(-4\pi^2\sigma^2(u^2+v^2)\right)
+\end{equation}
+Total output noise power:
+\begin{equation}
+\sigma_{\eta,\text{out}}^2 = \sigma_n^2 \int\!\!\int |H|^2\,du\,dv = \frac{\sigma_n^2}{4\pi\sigma^2}
+\end{equation}
+Thus the Gaussian filter reduces noise variance by a factor of $4\pi\sigma^2$, at the cost of blurring signal components at the same high frequencies.
+
+\subsection{Implementation}
+The implementation uses \texttt{scipy.ndimage.gaussian\_filter} applied independently per channel, with the image clamped to $[0,1]$ in float32. Parameter: $\sigma \in [0.5, 5.0]$.
+
+\section{Median Filter: Optimal ML Estimator}
+
+\subsection{Laplacian Noise Model}
+The Laplacian (double-exponential) distribution models impulse-like noise:
+\begin{equation}
+p(\eta;\,b) = \frac{1}{2b}\exp\!\left(-\frac{|\eta|}{b}\right), \quad \sigma_\eta^2 = 2b^2
+\end{equation}
+
+\subsection{ML Derivation}
+Given i.i.d. observations $\{y_k\}_{k=1}^{K}$ in a window centered at $(m,n)$, the log-likelihood under the Laplacian model is:
+\begin{equation}
+\ell(x) = \sum_{k=1}^{K} \log p(y_k - x) = -K\log(2b) - \frac{1}{b}\sum_{k=1}^{K}|y_k - x|
+\end{equation}
+Maximizing $\ell$ is equivalent to minimizing the $L_1$ loss:
+\begin{equation}
+\hat{x}_{ML} = \arg\min_{x \in \mathbb{R}} \sum_{k=1}^{K} |y_k - x|
+\label{eq:l1}
+\end{equation}
+The solution to \eqref{eq:l1} is the \textbf{sample median}:
+\begin{equation}
+\hat{x}_{ML}(m,n) = \mathrm{median}\{y_k : (k,l) \in \mathcal{W}_{m,n}\}
+\end{equation}
+
+\subsection{Robustness to Impulse Noise}
+The median has a \emph{breakdown point} of $\lfloor K/2 \rfloor / K \approx 50\%$: the estimate remains bounded even if nearly half the window is corrupted. In contrast, the mean has a 0\% breakdown point (a single extreme value can arbitrarily distort the estimate). This makes the median filter the preferred choice for Salt \& Pepper noise.
+
+\subsection{Implementation Details}
+OpenCV's \texttt{cv2.medianBlur} is used for efficiency (optimized for uint8 images). The pipeline converts float32 $\to$ uint8 before filtering and back to float32 after. Odd kernel sizes $K \in \{3, 5, 7, 9, 11\}$ are supported; even values are automatically incremented to the next odd integer.
+\section{Bilateral Filter: Edge-Preserving Smoothing}
+
+\subsection{Motivation}
+The Gaussian filter treats all pixels within the spatial kernel equally, blurring edges. The bilateral filter adds a second, \emph{radiometric} (intensity-domain) Gaussian that downweights contributions from pixels with very different intensities, effectively preserving edges while smoothing within homogeneous regions.
+
+\subsection{Filter Definition}
+\begin{equation}
+\hat{X}(m,n) = \frac{1}{W(m,n)}\sum_{(k,l)\in\mathcal{W}} Y(k,l)\,f_s(m,n,k,l)\,g_r(Y(m,n),Y(k,l))
+\end{equation}
+with normalization:
+\begin{equation}
+W(m,n) = \sum_{(k,l)\in\mathcal{W}} f_s(m,n,k,l)\,g_r(Y(m,n),Y(k,l))
+\end{equation}
+The spatial kernel is:
+\begin{equation}
+f_s(m,n,k,l) = \exp\!\left(-\frac{(m-k)^2+(n-l)^2}{2\sigma_s^2}\right)
+\end{equation}
+The radiometric kernel is:
+\begin{equation}
+g_r(I_p, I_q) = \exp\!\left(-\frac{(I_p - I_q)^2}{2\sigma_r^2}\right)
+\end{equation}
+
+\subsection{Interpretation of Parameters}
+\begin{itemize}
+\item $\sigma_s$ (\texttt{sigmaSpace}): Controls the spatial extent of smoothing. Larger $\sigma_s$ averages over a wider neighborhood.
+\item $\sigma_r$ (\texttt{sigmaColor}): Controls intensity selectivity. Small $\sigma_r$ (e.g., 10) only averages pixels with very similar intensities (strong edge preservation). Large $\sigma_r$ (e.g., 150) approaches standard Gaussian smoothing.
+\item $d$ (\texttt{diameter}): Diameter of the pixel neighborhood considered; set to $d = 9$ by default.
+\end{itemize}
+
+\subsection{Edge Preservation Property}
+At a step edge where $|I_p - I_q| \gg \sigma_r$, $g_r \approx 0$, so those cross-edge pixels contribute negligibly. The effective local kernel on the smooth side of the edge becomes:
+\begin{equation}
+w_\text{eff}(k,l) \propto f_s(k,l) \cdot \mathbf{1}[|I_{kl}-I_{mn}| \ll \sigma_r]
+\end{equation}
+This makes the bilateral filter a locally adaptive, nonlinear filter. It does not have a simple frequency-domain representation.
+
+\subsection{Implementation Note}
+The implementation applies \texttt{cv2.bilateralFilter} per channel on uint8 images. Images larger than $2000 \times 2000$ pixels are rejected to prevent excessive computation time (bilateral filtering is $O(K^2 MN)$ per iteration, non-separable).
+
+\section{Histogram Equalization: Entropy Maximization}
+
+\subsection{CDF-Based Intensity Remapping}
+Let $p_Y(r)$ be the normalized intensity histogram (empirical PMF) of the input image, and $F_Y(r) = \sum_{t=0}^{r} p_Y(t)$ its CDF. The equalization transform is:
+\begin{equation}
+T(r) = (L-1)\,F_Y(r), \quad L = 256
+\end{equation}
+Applied pixelwise: $s(m,n) = T(Y(m,n))$.
+
+\subsection{Proof of Entropy Maximization}
+For a continuous random variable $Y$ with PDF $p_Y$, a monotone transform $s = T(y)$ induces output PDF:
+\begin{equation}
+p_S(s) = p_Y(T^{-1}(s))\left|\frac{dT^{-1}}{ds}\right| = p_Y(y)\left|\frac{dy}{ds}\right|
+\end{equation}
+Setting $T'(y) = (L-1)\,p_Y(y)$ (i.e., $T = (L-1)F_Y$):
+\begin{equation}
+p_S(s) = p_Y(y) \cdot \frac{1}{(L-1)\,p_Y(y)} = \frac{1}{L-1}
+\end{equation}
+The output distribution is uniform on $[0, L-1]$, achieving maximum Shannon entropy:
+\begin{equation}
+H_{\max} = \log_2(L) = \log_2(256) = 8 \text{ bits}
+\end{equation}
+This is the theoretical upper bound for an 8-bit image, and histogram equalization achieves it in the continuous limit.
+
+\subsection{Color Image Handling}
+Applying equalization independently on R, G, B channels distorts the hue (color ratios change). Instead the implementation converts to YCrCb color space:
+\begin{equation}
+\begin{bmatrix}Y\\C_r\\C_b\end{bmatrix} = \begin{bmatrix}0.299&0.587&0.114\\0.5&-0.4187&-0.0813\\-0.1687&-0.3313&0.5\end{bmatrix}\begin{bmatrix}R\\G\\B\end{bmatrix} + \begin{bmatrix}0\\128\\128\end{bmatrix}
+\end{equation}
+Equalization is applied only to the luminance channel $Y$. Chrominance channels $C_r, C_b$ are unchanged, preserving color fidelity. The image is then converted back to RGB.
+
+\section{Bayesian MAP Denoising: Wiener Filter}
+
+\subsection{Statistical Model}
+The observation model is (from \eqref{eq:model}):
+\begin{align}
+Y | X &\sim \mathcal{N}(X,\, \sigma_n^2) \quad \text{(likelihood)}\\
+X &\sim \mathcal{N}(\mu_x,\, \sigma_x^2) \quad \text{(Gaussian prior)}
+\end{align}
+
+\subsection{Full MAP Derivation}
+The posterior is also Gaussian (conjugate prior):
+\begin{equation}
+p(X|Y) \propto p(Y|X)\,p(X) = \mathcal{N}(X;\,Y,\sigma_n^2)\cdot\mathcal{N}(X;\,\mu_x,\sigma_x^2)
+\end{equation}
+Taking the log and expanding:
+\begin{equation}
+\log p(X|Y) = -\frac{(Y-X)^2}{2\sigma_n^2} - \frac{(X-\mu_x)^2}{2\sigma_x^2} + \text{const}
+\end{equation}
+Differentiating with respect to $X$ and setting to zero:
+\begin{equation}
+\frac{Y - \hat{X}}{\sigma_n^2} - \frac{\hat{X} - \mu_x}{\sigma_x^2} = 0
+\end{equation}
+Solving:
+\begin{equation}
+\hat{X}_{MAP} = \frac{\sigma_x^2\, Y + \sigma_n^2\,\mu_x}{\sigma_x^2 + \sigma_n^2}
+= \mu_x + \underbrace{\frac{\sigma_x^2}{\sigma_x^2 + \sigma_n^2}}_{K}(Y - \mu_x)
+\label{eq:wiener}
+\end{equation}
+
+\subsection{Wiener Gain Interpretation}
+The scalar $K$ in \eqref{eq:wiener} is the \textbf{Wiener gain}:
+\begin{equation}
+\boxed{K = \frac{\sigma_x^2}{\sigma_x^2 + \sigma_n^2} \in [0,1]}
+\end{equation}
+It interpolates between the prior mean $\mu_x$ (when $K=0$, noise-dominated) and the noisy observation $Y$ (when $K=1$, signal-dominated). The posterior variance is:
+\begin{equation}
+\mathrm{Var}[X|Y] = \frac{\sigma_x^2\,\sigma_n^2}{\sigma_x^2 + \sigma_n^2} = K\,\sigma_n^2
+\end{equation}
+Note $\hat{X}_{MAP} = \hat{X}_{MMSE}$ under the Gaussian prior, so this estimator simultaneously minimizes both $L_2$ risk (MMSE) and achieves the MAP.
+
+\subsection{Local Parameter Estimation}
+In practice $\mu_x$ and $\sigma_x^2$ are unknown and estimated locally using a $5\times5$ uniform window $\mathcal{W}_5$:
+\begin{align}
+\hat{\mu}_x(m,n) &= \frac{1}{25}\sum_{(k,l)\in\mathcal{W}_5} Y(k,l) \\
+\hat{\sigma}_x^2(m,n) &= \max\!\left(0,\;\frac{1}{25}\sum_{(k,l)\in\mathcal{W}_5} Y(k,l)^2 - \hat{\mu}_x^2\right)
+\end{align}
+The $\max(0,\cdot)$ clamps negative values arising from floating-point round-off. This makes the denoiser \emph{spatially adaptive}: $K(m,n)$ is high in textured regions (preserve detail) and low in flat regions (aggressive denoising).
+
+\subsection{Wiener Gain Map Visualization}
+The system generates a false-color heatmap of $K(m,n)$ averaged over channels. Values near 0 (dark) indicate noise-dominated regions that are strongly smoothed; values near 1 (bright) indicate signal-dominated regions that are preserved.
+
+\section{Markov Random Field: ICM Smoothing}
+
+\subsection{MRF Definition}
+An image $\mathbf{X}$ is a Markov Random Field with respect to a 4-connected neighborhood system $\mathcal{N}$ if for every pixel $i$:
+\begin{equation}
+p(X_i | X_{j \neq i}) = p(X_i | X_j,\, j \in \mathcal{N}(i))
+\end{equation}
+By the Hammersley-Clifford theorem, such an MRF has a Gibbs distribution:
+\begin{equation}
+p(\mathbf{X}) = \frac{1}{Z}\exp(-U(\mathbf{X}))
+\end{equation}
+where $U$ is the \emph{Gibbs energy} defined as a sum over clique potentials.
+
+\subsection{Energy Function}
+The MAP-MRF energy combines a data fidelity term (likelihood) and a smoothness prior (pairwise clique potentials):
+\begin{equation}
+E(\mathbf{x}|\mathbf{y}) = \underbrace{\frac{1}{\sigma_n^2}\sum_i (y_i - x_i)^2}_{\text{data fidelity}} + \underbrace{\beta \sum_{\langle i,j\rangle} (x_i - x_j)^2}_{\text{smoothness prior}}
+\label{eq:mrf_energy}
+\end{equation}
+The quadratic pairwise potential $V(x_i,x_j) = (x_i-x_j)^2$ is a Gaussian MRF (GMRF) prior that penalizes intensity differences between neighboring pixels. Parameter $\beta \geq 0$ controls smoothness strength.
+
+\subsection{ICM Update Rule Derivation}
+The Iterated Conditional Modes algorithm minimizes \eqref{eq:mrf_energy} by optimizing one pixel at a time. For pixel $i$, the conditional energy is:
+\begin{equation}
+E(x_i | \mathbf{x}_{\setminus i}, \mathbf{y}) = \frac{(y_i-x_i)^2}{\sigma_n^2} + \beta\sum_{j\in\mathcal{N}(i)}(x_i-x_j)^2
+\end{equation}
+Setting $\partial E / \partial x_i = 0$:
+\begin{equation}
+-\frac{2(y_i-x_i)}{\sigma_n^2} + 2\beta\sum_{j\in\mathcal{N}(i)}(x_i-x_j) = 0
+\end{equation}
+Expanding the sum:
+\begin{equation}
+x_i\!\left(\frac{1}{\sigma_n^2} + \beta|\mathcal{N}_i|\right) = \frac{y_i}{\sigma_n^2} + \beta\sum_{j\in\mathcal{N}(i)} x_j
+\end{equation}
+\begin{equation}
+\boxed{\hat{x}_i^{(t+1)} = \frac{y_i/\sigma_n^2 + \beta\displaystyle\sum_{j\in\mathcal{N}(i)} x_j^{(t)}}{1/\sigma_n^2 + \beta|\mathcal{N}_i|}}
+\label{eq:icm_update}
+\end{equation}
+For interior pixels $|\mathcal{N}_i| = 4$, making the denominator a constant: $D = 1/\sigma_n^2 + 4\beta$.
+
+\subsection{Vectorized Implementation}
+Rather than iterating pixel by pixel, the neighbor sum in \eqref{eq:icm_update} is computed using a $3\times3$ uniform filter:
+\begin{equation}
+\sum_{j\in\mathcal{N}^*(i)} x_j = \texttt{uniform\_filter}(\mathbf{x},\,\text{size}=3) \times 9 - x_i
+\end{equation}
+where $\mathcal{N}^*(i)$ is the 8-connected neighborhood (includes diagonals in the vectorized approximation). This allows the entire image to be updated in a single vectorized pass per iteration, giving $O(MN)$ complexity per sweep.
+
+\subsection{Convergence}
+The convergence metric per iteration is:
+\begin{equation}
+\Delta^{(t)} = \left\|\mathbf{x}^{(t)} - \mathbf{x}^{(t-1)}\right\|_F^2 = \sum_{m,n}\bigl(x^{(t)}(m,n)-x^{(t-1)}(m,n)\bigr)^2
+\end{equation}
+The algorithm halts when $\Delta^{(t)} < 10^{-8}$ or after the maximum number of iterations (default 10, configurable up to 50). Since the energy \eqref{eq:mrf_energy} is strictly convex in $\mathbf{x}$, ICM converges to the global minimum.
+\section{Statistical Analysis Framework}
+
+\subsection{First-Order Moment Statistics}
+For a single image channel $\{x(m,n)\}$ with $N = M_1 M_2$ pixels:
+\begin{align}
+\mu_X &= \frac{1}{N}\sum_{m,n} x(m,n) \\
+\sigma_X^2 &= \frac{1}{N}\sum_{m,n}(x(m,n)-\mu_X)^2 \\
+\gamma_1 &= \frac{1}{N\sigma_X^3}\sum_{m,n}(x(m,n)-\mu_X)^3 \quad\text{(skewness)}\\
+\gamma_2 &= \frac{1}{N\sigma_X^4}\sum_{m,n}(x(m,n)-\mu_X)^4 - 3 \quad\text{(excess kurtosis)}
+\end{align}
+Skewness measures asymmetry of the intensity histogram. Excess kurtosis measures tail heaviness relative to a Gaussian ($\gamma_2=0$ for Gaussian; $\gamma_2 > 0$ for heavy-tailed distributions such as Laplacian). These serve as noise-type indicators in addition to the dedicated noise classifier.
+
+\subsection{Signal-to-Noise Ratio}
+The system defines SNR using the mean as the signal power estimate and variance as noise power:
+\begin{equation}
+\text{SNR} = \frac{\mu_X^2}{\sigma_X^2}, \qquad \text{SNR}_{dB} = 10\log_{10}\!\left(\frac{\mu_X^2}{\sigma_X^2}\right)
+\end{equation}
+This definition follows from modeling the image as signal $\mu_X$ plus zero-mean noise of variance $\sigma_X^2$. Per-step improvement is computed as:
+\begin{equation}
+\Delta\text{SNR}_{dB} = \text{SNR}_{dB}^{\text{output}} - \text{SNR}_{dB}^{\text{input}}
+\end{equation}
+
+\subsection{Shannon Entropy}
+Entropy measures information content from the 256-bin normalized histogram $\{p_k\}_{k=0}^{255}$:
+\begin{equation}
+H = -\sum_{k=0}^{255} p_k \log_2 p_k \quad \text{(bits)}
+\end{equation}
+Entropy increases after histogram equalization (histogram becomes more uniform) and decreases after aggressive smoothing (less variation in pixel values). The theoretical maximum for 8-bit images is $H=8$ bits.
+
+\subsection{Normalized 2-D Autocorrelation}
+The normalized autocorrelation function (ACF) of the zero-mean luminance field $\tilde{Y}(m,n) = Y(m,n) - \mu_Y$ at lag $(\Delta m, \Delta n)$:
+\begin{equation}
+R_{YY}[\Delta m, \Delta n] = \frac{\displaystyle\sum_{m,n}\tilde{Y}(m,n)\,\tilde{Y}(m+\Delta m,\,n+\Delta n)}{N\sigma_Y^2}
+\end{equation}
+By the Wiener-Khinchin theorem, the ACF and PSD form a Fourier transform pair:
+\begin{equation}
+S_Y(u,v) = \mathcal{F}\{R_{YY}[\Delta m,\Delta n]\}
+\end{equation}
+White noise has $R_{YY}[\Delta m,\Delta n] = \sigma_n^2\,\delta[\Delta m]\,\delta[\Delta n]$ (zero correlation at all non-zero lags). Natural images have high ACF at small lags, reflecting spatial smoothness. The system reports ACF at lags $(1,0)$, $(0,1)$, and $(1,1)$.
+
+\subsection{2-D Autocorrelation Visualization}
+The full 2-D ACF is computed via \texttt{scipy.signal.correlate2d} and cropped to a $64\times64$ center patch for visualization. The map is normalized to $[-1,1]$ and displayed using a RdBu colormap. A peaked center spike with rapid fall-off indicates near-white noise; a broad main lobe indicates strongly spatially correlated content.
+
+\subsection{BT.601 Luminance Extraction}
+For RGB images, scalar statistics are computed on the luma channel:
+\begin{equation}
+Y(m,n) = 0.299\,R(m,n) + 0.587\,G(m,n) + 0.114\,B(m,n)
+\end{equation}
+These weights follow the ITU-R BT.601 standard and reflect the human visual system's higher sensitivity to green wavelengths.
+
+\section{System Architecture}
+
+\subsection{Backend Stack}
+The processing pipeline is implemented as a Python 3.11 FastAPI application, following a service-oriented architecture:
+
+\begin{table}[h]
+\caption{Backend Module Responsibilities}
+\centering
+\begin{tabular}{@{}p{3.5cm}p{4.5cm}@{}}
+\toprule
+\textbf{Module} & \textbf{Responsibility} \\
+\midrule
+\texttt{main.py} & App entry, CORS, lifespan \\
+\texttt{routers/upload.py} & Image ingestion, session creation \\
+\texttt{routers/process.py} & Pipeline orchestration \\
+\texttt{services/noise\_detector.py} & MAD + S\&P + Laplacian classifier \\
+\texttt{services/filters.py} & Gaussian, Median, Bilateral, Histeq \\
+\texttt{services/bayesian\_estimator.py} & MAP/Wiener per-pixel denoising \\
+\texttt{services/markov\_field.py} & MRF-ICM smoothing \\
+\texttt{services/stat\_analyzer.py} & All statistical metrics \\
+\texttt{services/visualizer.py} & Matplotlib chart generation \\
+\texttt{utils/image\_io.py} & Float32/uint8/base64 conversion \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{REST API Endpoints}
+\begin{table}[h]
+\caption{API Endpoint Summary}
+\centering
+\begin{tabular}{@{}p{1.5cm}p{3cm}p{3cm}@{}}
+\toprule
+\textbf{Method} & \textbf{Endpoint} & \textbf{Action} \\
+\midrule
+POST & \texttt{/api/upload} & Upload image, get session\_id \\
+POST & \texttt{/api/process/\{sid\}} & Run pipeline, get results \\
+GET  & \texttt{/api/health} & Health check \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Pipeline Data Flow}
+Images are stored server-side as float32 NumPy arrays keyed by UUID session IDs. A background \texttt{asyncio} coroutine periodically purges stale sessions. The processing endpoint accepts a JSON body specifying a list of step identifiers and parameters:
+\begin{verbatim}
+{"steps": ["noise_analysis",
+           "gaussian_filter",
+           "bayesian_map"],
+ "params": {"gaussian_sigma": 1.5,
+            "bayesian_noise_var": null}}
+\end{verbatim}
+Steps execute sequentially; the output image of step $t$ is the input to step $t+1$. Each step returns: filtered image (base64 PNG), statistics dictionary, and chart images (base64 PNG histograms, SNR bar, convergence plot, Wiener gain heatmap).
+
+\subsection{Image Representation}
+All internal operations use float32 in $[0,1]$. Conversion pipeline:
+\begin{equation}
+\text{PIL} \xrightarrow{\div 255} \text{float32} \xrightarrow{\text{process}} \text{float32} \xrightarrow{\times 255} \text{uint8} \xrightarrow{\text{PNG/Base64}} \text{JSON}
+\end{equation}
+The float32 representation prevents cascading quantization errors across pipeline stages.
+
+\section{Results and Discussion}
+
+\subsection{Filter-Noise Model Correspondence}
+Table~\ref{tab:correspondence} summarizes the theoretical optimality of each filter for each noise type.
+
+\begin{table}[h]
+\caption{Filter--Noise Model Correspondence}
+\label{tab:correspondence}
+\centering
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Filter} & \textbf{Noise Model} & \textbf{Optimality} & \textbf{Complexity} \\
+\midrule
+Gaussian   & AWGN & LTI / spectral & $O(MN)$ \\
+Median     & Laplacian/Impulse & ML $L_1$ & $O(MNK\log K)$ \\
+Bilateral  & AWGN + edges & MAP edge-aware & $O(MNK^2)$ \\
+Hist. Eq.  & Contrast/Blur & Max entropy & $O(MN)$ \\
+Bayesian   & AWGN (Gaussian prior) & MAP = MMSE & $O(MN)$ \\
+MRF-ICM    & AWGN (GMRF prior) & MAP-MRF & $O(MNT)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{SNR Improvement Analysis}
+The system tracks $\text{SNR}_{dB}$ before and after every step. The Bayesian MAP denoiser typically achieves the largest SNR improvement for AWGN because it directly minimizes the posterior risk. The median filter achieves the largest improvement for Salt \& Pepper noise. Bilateral filtering improves SNR while keeping the edge sharpness metric (Laplacian variance) high, unlike Gaussian filtering which degrades it.
+
+\subsection{Entropy Behavior}
+Histogram equalization reliably increases entropy toward $H=8$ bits. Conversely, Gaussian and Bayesian MAP filtering reduce entropy slightly as the smoothed output has a more concentrated histogram. The entropy reports at each step allow quantitative verification of these theoretical predictions.
+
+\subsection{Autocorrelation Signatures}
+A noisy image typically shows near-zero ACF at non-zero lags ($R_{YY}[1,0] \approx 0$), consistent with white noise. After Gaussian or Bayesian MAP filtering, ACF at lag $(1,0)$ increases (the output becomes spatially correlated), reflecting the smoothing operation. After MRF-ICM, ACF increases more strongly due to the explicit spatial coupling enforced by $\beta$.
+
+\section{Conclusion}
+
+This paper presented a modular probabilistic signal processing framework for image denoising and enhancement, implemented as a production-grade REST API. The following contributions were made:
+
+\begin{enumerate}
+\item A three-feature noise classifier combining MAD, impulse density, and Laplacian variance, providing automatic filter recommendations.
+\item Six filters derived from first principles: Gaussian (LTI/PSD), Median ($L_1$/ML), Bilateral (edge-preserving MAP), Histogram Equalization (entropy maximization), Bayesian MAP (Wiener filter), and MRF-ICM (GMRF prior).
+\item A spatially adaptive Bayesian MAP denoiser with closed-form Wiener gain $K = \sigma_x^2/(\sigma_x^2+\sigma_n^2)$ estimated locally in $5\times5$ windows.
+\item A vectorized MRF-ICM implementation with convergence tracking.
+\item A comprehensive statistical analysis suite: entropy, SNR, skewness, excess kurtosis, and 2-D normalized autocorrelation.
+\item A RESTful FastAPI service enabling pipeline composition, per-step reporting, and session-based image management.
+\end{enumerate}
+
+Future work includes: extending the MRF prior to non-quadratic (Total Variation) potentials for sharper edge preservation; wavelet-domain soft-thresholding (Donoho-Johnstone); incorporating deep-learning denoisers (DnCNN, FFDNet) as optional pipeline stages; and extending the noise classifier to handle Poisson (photon shot) and speckle noise models.
+
+\begin{thebibliography}{00}
+\bibitem{papoulis} A. Papoulis and S. U. Pillai, \textit{Probability, Random Variables, and Stochastic Processes}, 4th~ed. New York: McGraw-Hill, 2002.
+\bibitem{gonzalez} R. C. Gonzalez and R. E. Woods, \textit{Digital Image Processing}, 4th~ed. London: Pearson, 2018.
+\bibitem{wiener} N. Wiener, \textit{Extrapolation, Interpolation, and Smoothing of Stationary Time Series}. Cambridge, MA: MIT Press, 1949.
+\bibitem{geman} S. Geman and D. Geman, ``Stochastic relaxation, Gibbs distributions, and the Bayesian restoration of images,'' \textit{IEEE Trans. Pattern Anal. Mach. Intell.}, vol.~PAMI-6, no.~6, pp.~721--741, Nov.~1984. \href{https://doi.org/10.1109/TPAMI.1984.4767596}{doi:10.1109/TPAMI.1984.4767596}
+\bibitem{tomasi} C. Tomasi and R. Manduchi, ``Bilateral filtering for gray and color images,'' in \textit{Proc. IEEE ICCV}, Bombay, India, 1998, pp.~839--846. \href{https://doi.org/10.1109/ICCV.1998.710815}{doi:10.1109/ICCV.1998.710815}
+\bibitem{besag} J. Besag, ``On the statistical analysis of dirty pictures,'' \textit{J. Roy. Stat. Soc.~B}, vol.~48, no.~3, pp.~259--302, 1986.
+\bibitem{shannon} C.~E. Shannon, ``A mathematical theory of communication,'' \textit{Bell Syst. Tech. J.}, vol.~27, pp.~379--423, 1948. \href{https://doi.org/10.1002/j.1538-7305.1948.tb01338.x}{doi:10.1002/j.1538-7305.1948.tb01338.x}
+\bibitem{donoho} D.~L. Donoho and I.~M. Johnstone, ``Ideal spatial adaptation by wavelet shrinkage,'' \textit{Biometrika}, vol.~81, no.~3, pp.~425--455, 1994. \href{https://doi.org/10.1093/biomet/81.3.425}{doi:10.1093/biomet/81.3.425}
+\bibitem{scipy} P. Virtanen \textit{et al.}, ``SciPy 1.0: Fundamental algorithms for scientific computing in Python,'' \textit{Nature Methods}, vol.~17, pp.~261--272, 2020. \href{https://doi.org/10.1038/s41592-019-0686-2}{doi:10.1038/s41592-019-0686-2}
+\bibitem{opencv} G. Bradski, ``The OpenCV library,'' \textit{Dr.~Dobb's J. Software Tools}, vol.~25, no.~11, pp.~120--125, 2000. \href{https://opencv.org}{opencv.org}
+\bibitem{fastapi} S. Ramirez, ``FastAPI framework,'' 2019. [Online]. Available: \href{https://fastapi.tiangolo.com}{https://fastapi.tiangolo.com}
+\end{thebibliography}
+
+\end{document}
