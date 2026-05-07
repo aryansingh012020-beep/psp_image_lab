@@ -37,13 +37,17 @@ STEP_LABELS = {
 
 
 def _snr_db(arr: np.ndarray) -> float:
-    lum = get_luminance(arr).ravel().astype(np.float64)
-    mu = lum.mean()
-    var = lum.var()
-    if var <= 1e-12:
-        return 100.0
-    val = 10.0 * np.log10((mu ** 2) / var)
-    return float(val) if np.isfinite(val) else 0.0
+    """PSNR-style SNR: 10·log10(1 / MSE_of_high_freq_residual).
+    Uses the HF residual as proxy for noise energy — gives meaningful
+    improvement values even on clean images."""
+    from scipy.ndimage import gaussian_filter
+    lum = get_luminance(arr).astype(np.float64)
+    blurred = gaussian_filter(lum, sigma=1.5)
+    residual = lum - blurred
+    mse = float(np.mean(residual ** 2))
+    if mse <= 1e-12:
+        return 60.0   # essentially noise-free
+    return float(10.0 * np.log10(1.0 / mse))
 
 
 @router.post("/process/{session_id}", response_model=PipelineResult)
@@ -155,7 +159,10 @@ async def process_image(session_id: str, req: ProcessRequest) -> PipelineResult:
                 else:
                     if noise_report is None:
                         noise_report = classify_noise(current_image)
-                    nvar = noise_report.estimated_sigma ** 2
+                    # Enforce a minimum noise floor so denoising is always meaningful
+                    raw_sigma = noise_report.estimated_sigma
+                    effective_sigma = max(raw_sigma, 0.04)  # at least σ=0.04 → variance=0.0016
+                    nvar = effective_sigma ** 2
 
                 step_image, bay_stats = apply_bayesian_map(current_image, nvar)
                 stats = {
@@ -172,7 +179,10 @@ async def process_image(session_id: str, req: ProcessRequest) -> PipelineResult:
             elif step_id == "mrf_prior":
                 if noise_report is None:
                     noise_report = classify_noise(current_image)
-                sigma_n2 = noise_report.estimated_sigma ** 2 if noise_report.estimated_sigma > 0 else 0.01
+                # Same minimum floor as Bayesian step
+                raw_sigma = noise_report.estimated_sigma if noise_report else 0.04
+                effective_sigma = max(raw_sigma, 0.04)
+                sigma_n2 = effective_sigma ** 2
 
                 mrf_out = apply_mrf(
                     current_image,

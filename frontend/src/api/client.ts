@@ -34,3 +34,24 @@ export async function processImage(
   });
   return handleResponse<PipelineResult>(res);
 }
+
+export interface NoiseResponse {
+  image_base64: string;
+  sigma_used: number;
+  noise_type: string;
+}
+
+export async function addNoise(
+  sessionId: string,
+  sigma: number,
+  noiseType: 'gaussian' | 'salt_pepper' | 'both',
+  spDensity: number,
+): Promise<NoiseResponse> {
+  const res = await fetch(`${BASE}/noise/${sessionId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sigma, noise_type: noiseType, sp_density: spDensity }),
+  });
+  return handleResponse<NoiseResponse>(res);
+}
+
